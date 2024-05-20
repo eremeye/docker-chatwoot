@@ -1,0 +1,102 @@
+version: '3'
+
+services:
+
+  traefik:
+    container_name: traefik
+    image: "traefik:2.11"
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --providers.docker
+      - --log.level=ERROR
+      - --certificatesresolvers.leresolver.acme.httpchallenge=true
+      - --certificatesresolvers.leresolver.acme.email=${ADMIN_EMAIL} #Set your email address here, is for the generation of SSL certificates with Let's Encrypt.
+      - --certificatesresolvers.leresolver.acme.storage=./secrets/acme.json
+      - --certificatesresolvers.leresolver.acme.httpchallenge.entrypoint=web
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - secrets:/secrets
+    labels:
+      - "traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+
+  base: &base
+    image: chatwoot/chatwoot:v3.9.0
+    container_name: base
+    environment:
+      - SECRET_KEY_BASE
+      - FRONTEND_URL
+      - ENABLE_ACCOUNT_SIGNUP
+      - REDIS_URL
+      - REDIS_PASSWORD
+      - POSTGRES_HOST
+      - POSTGRES_USERNAME
+      - POSTGRES_DATABASE
+      - POSTGRES_PASSWORD
+    volumes:
+      - app_data:/app/storage
+
+  rails:
+    <<: *base
+    container_name: rails
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.chatwoot.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.chatwoot.entrypoints=websecure"
+      - "traefik.http.services.chatwoot.loadbalancer.server.port=3000"
+      - "traefik.http.routers.chatwoot.tls.certresolver=leresolver"
+    entrypoint: docker/entrypoints/rails.sh
+    command: ['bundle', 'exec', 'rails', 's', '-p', '3000', '-b', '0.0.0.0']
+
+
+  sidekiq:
+    <<: *base
+    container_name: sidekiq
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+    command: ['bundle', 'exec', 'sidekiq', '-C', 'config/sidekiq.yml']
+
+  postgres:
+    image: postgres:14.4
+    container_name: postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=$POSTGRES_USERNAME
+      - POSTGRES_DB=$POSTGRES_DATABASE
+      - POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    container_name: redis
+    image: redis:alpine
+    restart: always
+    environment:
+      - REDIS_PASSWORD
+    command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
+    volumes:
+      - redis_data:/data
+
+volumes:
+  app_data:
+  pg_data:
+  redis_data:
+  secrets:
